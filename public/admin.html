@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Admin — Upload Story</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <h1>🔑 Admin Panel</h1>
+  <a href="/">← Back to site</a>
+</header>
+
+<main>
+  <form id="storyForm">
+    <label>Admin Key</label>
+    <input type="password" id="adminKey" placeholder="Apna admin key daalein" required />
+
+    <label>Story Title</label>
+    <input type="text" id="title" required />
+
+    <label>Author Name (optional)</label>
+    <input type="text" id="author" placeholder="Anonymous" />
+
+    <label>Story Content</label>
+    <textarea id="content" required placeholder="Yahan apni story likhein..."></textarea>
+
+    <button type="submit">Upload Story</button>
+    <div id="msg" class="msg"></div>
+  </form>
+
+  <div class="story-list-admin" id="storyListAdmin"></div>
+
+  <a class="events-link" id="eventsLink" href="#">📄 View event log (events.txt)</a>
+</main>
+
+<script src="/track.js"></script>
+<script>
+  const form = document.getElementById("storyForm");
+  const msg = document.getElementById("msg");
+  const storyListAdmin = document.getElementById("storyListAdmin");
+  const eventsLink = document.getElementById("eventsLink");
+
+  function getKey() {
+    return document.getElementById("adminKey").value;
+  }
+
+  eventsLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    const key = getKey() || prompt("Admin key daalein event log dekhne ke liye:");
+    if (!key) return;
+    window.open(`/admin/events?key=${encodeURIComponent(key)}`, "_blank");
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    msg.textContent = "";
+    msg.className = "msg";
+
+    const body = {
+      key: getKey(),
+      title: document.getElementById("title").value,
+      author: document.getElementById("author").value,
+      content: document.getElementById("content").value,
+    };
+
+    const res = await fetch("/api/stories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      msg.textContent = "✅ Story upload ho gayi!";
+      msg.classList.add("ok");
+      form.reset();
+      document.getElementById("adminKey").value = body.key;
+      track("story_uploaded_ui", body.title);
+      loadStoriesAdmin();
+    } else {
+      msg.textContent = "❌ " + (data.error || "Kuch galat hua");
+      msg.classList.add("err");
+    }
+  });
+
+  async function loadStoriesAdmin() {
+    const res = await fetch("/api/stories");
+    const stories = await res.json();
+    storyListAdmin.innerHTML = "<h3>Existing Stories</h3>";
+    stories.forEach((s) => {
+      const row = document.createElement("div");
+      row.className = "admin-story-row";
+      row.innerHTML = `<span>${s.title}</span>`;
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "Delete";
+      delBtn.onclick = async () => {
+        const key = getKey();
+        if (!key) return alert("Pehle admin key daalein");
+        if (!confirm("Delete this story?")) return;
+        await fetch(`/api/stories/${s.id}`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key }),
+        });
+        loadStoriesAdmin();
+      };
+      row.appendChild(delBtn);
+      storyListAdmin.appendChild(row);
+    });
+  }
+
+  loadStoriesAdmin();
+</script>
+</body>
+</html>
