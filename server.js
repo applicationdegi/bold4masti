@@ -1,44 +1,47 @@
 const express = require("express");
-const fs = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---- Change this password before you share the admin link! ----
+// ---- Change this before you share the admin link! ----
 const ADMIN_KEY = process.env.ADMIN_KEY || "mystories123";
 
-const STORIES_FILE = path.join(__dirname, "data", "stories.json");
-const EVENTS_FILE = path.join(__dirname, "events.txt");
+// ---- Set this in Render's Environment settings (see instructions) ----
+const MONGODB_URI = process.env.MONGODB_URI;
 
-// make sure data files exist
-if (!fs.existsSync(STORIES_FILE)) {
-  fs.writeFileSync(STORIES_FILE, "[]", "utf8");
+if (!MONGODB_URI) {
+  console.error(
+    "ERROR: MONGODB_URI is not set. Add it in Render's Environment tab, or in a local .env file."
+  );
 }
-if (!fs.existsSync(EVENTS_FILE)) {
-  fs.writeFileSync(EVENTS_FILE, "", "utf8");
-}
+
+mongoose
+  .connect(MONGODB_URI)
+  .then(() => console.log("Connected to MongoDB"))
+  .catch((err) => console.error("MongoDB connection error:", err));
+
+// ---------- Schemas ----------
+const storySchema = new mongoose.Schema({
+  title: String,
+  content: String,
+  author: String,
+  createdAt: { type: Date, default: Date.now },
+});
+const Story = mongoose.model("Story", storySchema);
+
+const eventSchema = new mongoose.Schema({
+  event: String,
+  page: String,
+  detail: String,
+  ip: String,
+  timestamp: { type: Date, default: Date.now },
+});
+const Event = mongoose.model("Event", eventSchema);
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
-
-function readStories() {
-  try {
-    return JSON.parse(fs.readFileSync(STORIES_FILE, "utf8"));
-  } catch (e) {
-    return [];
-  }
-}
-
-function writeStories(stories) {
-  fs.writeFileSync(STORIES_FILE, JSON.stringify(stories, null, 2), "utf8");
-}
-
-function logEvent(entry) {
-  const time = new Date().toISOString();
-  const line = `[${time}] ${entry}\n`;
-  fs.appendFileSync(EVENTS_FILE, line, "utf8");
-}
 
 function getIp(req) {
   return (
@@ -48,77 +51,108 @@ function getIp(req) {
   );
 }
 
+async function logEvent(event, page, detail, ip) {
+  try {
+    await Event.create({ event, page, detail, ip });
+  } catch (e) {
+    console.error("Failed to log event:", e.message);
+  }
+}
+
 // ---------- Public API: get all stories ----------
-app.get("/api/stories", (req, res) => {
-  res.json(readStories());
+app.get("/api/stories", async (req, res) => {
+  try {
+    const stories = await Story.find().sort({ createdAt: -1 });
+    res.json(stories);
+  } catch (e) {
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 // ---------- Track any event from the frontend ----------
-app.post("/api/track", (req, res) => {
+app.post("/api/track", async (req, res) => {
   const { event, page, detail } = req.body || {};
-  const ip = getIp(req);
-  logEvent(
-    `EVENT="${event || "unknown"}" PAGE="${page || "-"}" DETAIL="${
-      detail || "-"
-    }" IP=${ip}`
-  );
+  await logEvent(event || "unknown", page || "-", detail || "-", getIp(req));
   res.json({ ok: true });
 });
 
 // ---------- Admin: add a new story (needs the admin key) ----------
-app.post("/api/stories", (req, res) => {
+app.post("/api/stories", async (req, res) => {
   const { title, content, author, key } = req.body || {};
 
   if (key !== ADMIN_KEY) {
-    logEvent(`EVENT="admin_upload_failed_wrong_key" IP=${getIp(req)}`);
+    await logEvent("admin_upload_failed_wrong_key", "-", "-", getIp(req));
     return res.status(401).json({ ok: false, error: "Wrong admin key" });
   }
   if (!title || !content) {
     return res.status(400).json({ ok: false, error: "Title/content missing" });
   }
 
-  const stories = readStories();
-  const newStory = {
-    id: Date.now().toString(),
-    title,
-    content,
-    author: author || "Anonymous",
-    createdAt: new Date().toISOString(),
-  };
-  stories.unshift(newStory);
-  writeStories(stories);
-
-  logEvent(`EVENT="story_uploaded" TITLE="${title}" IP=${getIp(req)}`);
-  res.json({ ok: true, story: newStory });
+  try {
+    const story = await Story.create({
+      title,
+      content,
+      author: author || "Anonymous",
+    });
+    await logEvent("story_uploaded", "-", title, getIp(req));
+    res.json({ ok: true, story });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "Database error" });
+  }
 });
 
 // ---------- Admin: delete a story ----------
-app.delete("/api/stories/:id", (req, res) => {
+app.delete("/api/stories/:id", async (req, res) => {
   const { key } = req.body || {};
   if (key !== ADMIN_KEY) {
     return res.status(401).json({ ok: false, error: "Wrong admin key" });
   }
-  let stories = readStories();
-  stories = stories.filter((s) => s.id !== req.params.id);
-  writeStories(stories);
-  logEvent(`EVENT="story_deleted" ID="${req.params.id}" IP=${getIp(req)}`);
-  res.json({ ok: true });
+  try {
+    await Story.findByIdAndDelete(req.params.id);
+    await logEvent("story_deleted", "-", req.params.id, getIp(req));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "Database error" });
+  }
 });
 
-// ---------- Admin: view/download the events log ----------
-app.get("/admin/events", (req, res) => {
+// ---------- Admin: view the events log as plain text ----------
+app.get("/admin/events", async (req, res) => {
   if (req.query.key !== ADMIN_KEY) {
     return res.status(401).send("Wrong or missing ?key=");
   }
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.send(fs.readFileSync(EVENTS_FILE, "utf8") || "(no events yet)");
+  try {
+    const events = await Event.find().sort({ timestamp: 1 });
+    if (!events.length) {
+      return res.type("text/plain").send("(no events yet)");
+    }
+    const lines = events.map(
+      (e) =>
+        `[${e.timestamp.toISOString()}] EVENT="${e.event}" PAGE="${e.page}" DETAIL="${e.detail}" IP=${e.ip}`
+    );
+    res.type("text/plain").send(lines.join("\n"));
+  } catch (e) {
+    res.status(500).send("Database error");
+  }
 });
 
-app.get("/admin/events/download", (req, res) => {
+// ---------- Admin: download the events log as a .txt file ----------
+app.get("/admin/events/download", async (req, res) => {
   if (req.query.key !== ADMIN_KEY) {
     return res.status(401).send("Wrong or missing ?key=");
   }
-  res.download(EVENTS_FILE, "events.txt");
+  try {
+    const events = await Event.find().sort({ timestamp: 1 });
+    const lines = events.map(
+      (e) =>
+        `[${e.timestamp.toISOString()}] EVENT="${e.event}" PAGE="${e.page}" DETAIL="${e.detail}" IP=${e.ip}`
+    );
+    const content = lines.join("\n") || "(no events yet)";
+    res.setHeader("Content-Disposition", "attachment; filename=events.txt");
+    res.type("text/plain").send(content);
+  } catch (e) {
+    res.status(500).send("Database error");
+  }
 });
 
 app.listen(PORT, () => {
